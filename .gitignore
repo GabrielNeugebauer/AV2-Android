@@ -1,0 +1,8 @@
+notes/*
+reference_videos/*
+build/*
+results/*
+.vscode
+.venv
+src/*
+streams/*
