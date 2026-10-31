@@ -1,13 +1,14 @@
-"""Benchmarks dav2d on an Android phone over adb and writes one CSV row per run.
+"""Benchmarks dav2d (or dav1d, for the AV1 comparison) on an Android phone over adb and writes one CSV row per run.
 
 For each stream: one decode with --verify checks the output against the reference MD5, then N timed runs
 decode with the null muxer, one at a time, with a cool-down in between. Each timed run records the wall time
-measured on the phone, the per-frame times from dav2d, the highest CPU temperature before and after, and the
+measured on the phone, the per-frame times from the decoder, the highest CPU temperature before and after, and the
 average battery power during the run.
 
 Usage (from the AV2-Android folder):
     python scripts/bench.py --serial e113b3850013 --streams streams/*.obu --runs 5 --threads 1 8 \
         --out results/bench.csv [--lock-clocks] [--battery-power] [--cpumask 0] [--freq 0:1017600] [--cpus 0-5]
+    python scripts/bench.py --serial e113b3850013 --decoder dav1d --streams streams/<av1 set>/*.ivf --out results/av1.csv
 
 Power is only meaningful with --battery-power: while the USB cable charges the phone, the battery current includes
 the charging current. --battery-power pauses the USB input (root) so the phone runs on battery, keeping adb connected.
@@ -15,8 +16,11 @@ the charging current. --battery-power pauses the USB input (root) so the phone r
 --freq pins a CPU cluster at one frequency (root) and --cpus keeps the decoder on chosen cores (taskset); together they
 measure how decoding scales with clock speed on one core type. scripts/freq_sweep.sh runs that for every frequency.
 
-The phone must already have dav2d in /data/local/tmp/av2 (scripts/phone_smoke_test.sh pushes it). Each stream needs a
-<stream>.md5 next to it (scripts/make_streams.py writes it). The CSV columns are described in README.md.
+The phone must already have the decoder in /data/local/tmp/av2 (scripts/install_phone.sh pushes it). Each stream needs
+a <stream>.md5 next to it (scripts/make_streams.py writes it). The CSV columns are described in README.md.
+
+CSVs written before the decoder column existed are still appended to, in their own columns, when the decoder is dav2d
+(all their rows are dav2d); dav1d runs need a CSV with the decoder column.
 """
 
 import argparse
@@ -31,10 +35,10 @@ from datetime import datetime
 from pathlib import Path
 
 PHONE_DIR = "/data/local/tmp/av2"
-DAV2D = f"{PHONE_DIR}/dav2d"
 CPUFREQ = "/sys/devices/system/cpu/cpufreq"
-FIELDS = ["date", "device", "stream", "threads", "cpumask", "cpus", "clocks", "freq_khz", "power_source", "run", "frames", "wall_s", "fps",
+FIELDS = ["date", "device", "decoder", "stream", "threads", "cpumask", "cpus", "clocks", "freq_khz", "power_source", "run", "frames", "wall_s", "fps",
           "frametime_median_ms", "frametime_max_ms", "temp_before_c", "temp_after_c", "power_mw", "md5_ok"]
+OLD_FIELDS = [f for f in FIELDS if f != "decoder"]  # CSVs from before --decoder; all their rows are dav2d
 
 
 def adb(serial, command, root=False, check=True):
@@ -132,7 +136,7 @@ def push_if_needed(serial, local):
     return remote
 
 
-def timed_run(serial, remote, threads, cpumask, cpus=None):
+def timed_run(serial, decoder, remote, threads, cpumask, cpus=None):
     """Decodes once with the null muxer. Returns wall time (s), per-frame times (ms), average power (mW) and the
     CPU frequencies seen during the decode, per policy in policy order, as (lowest, highest) kHz pairs."""
     mask = f"--cpumask {cpumask}" if cpumask is not None else ""
@@ -151,7 +155,7 @@ def timed_run(serial, remote, threads, cpumask, cpus=None):
         f"$(cat {CPUFREQ}/policy*/scaling_cur_freq) >> {power}; "
         f"sleep 0.1; done) & "
         f"t0=$(date +%s%N); "
-        f"{pin}{DAV2D} -q -i {remote} --threads {threads} {mask} --muxer null -o /dev/null --frametimes {ft}; rc=$?; "
+        f"{pin}{PHONE_DIR}/{decoder} -q -i {remote} --threads {threads} {mask} --muxer null -o /dev/null --frametimes {ft}; rc=$?; "
         f"t1=$(date +%s%N); touch {done}; wait; "
         f"echo WALL $((t1 - t0)) RC $rc; cat {ft}; echo POWER; cat {power}"
     )
@@ -159,10 +163,10 @@ def timed_run(serial, remote, threads, cpumask, cpus=None):
     head, _, rest = out.partition("\n")
     parts = head.split()
     if parts[3] != "0":
-        raise RuntimeError(f"dav2d failed on {remote}: rc={parts[3]}")
+        raise RuntimeError(f"{decoder} failed on {remote}: rc={parts[3]}")
     wall_s = int(parts[1]) / 1e9
     frames_part, _, power_part = rest.partition("POWER")
-    frametimes = [float(x) / 1e6 for x in frames_part.split()]  # dav2d writes the time between output frames in ns
+    frametimes = [float(x) / 1e6 for x in frames_part.split()]  # the decoder writes the time between output frames in ns
     samples = [list(map(int, line.split())) for line in power_part.strip().splitlines()
                if len(line.split()) >= 2 and all(x.lstrip("-").isdigit() for x in line.split())]
     # current_now is negative while discharging on this phone; power = |I| * V
@@ -177,11 +181,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--serial", required=True)
+    ap.add_argument("--decoder", choices=["dav2d", "dav1d"], default="dav2d",
+                    help="dav2d for AV2 streams, dav1d for AV1 streams (the AV1 comparison)")
     ap.add_argument("--streams", nargs="+", type=Path, required=True,
-                    help="AV2 .obu files; the expected MD5 is read from <stream>.md5")
+                    help="AV2 .obu files (or AV1 .ivf with --decoder dav1d); the expected MD5 is read from <stream>.md5")
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--threads", type=int, nargs="+", default=[1])
-    ap.add_argument("--cpumask", default=None, help="passed to dav2d --cpumask (0 = plain C only)")
+    ap.add_argument("--cpumask", default=None, help="passed to the decoder's --cpumask (0 = plain C only, neon, dotprod, i8mm)")
     ap.add_argument("--lock-clocks", action="store_true", help="set the 'performance' governor during the runs (root)")
     ap.add_argument("--battery-power", action="store_true", help="pause USB charging during the runs (root)")
     ap.add_argument("--freq", nargs="+", metavar="POLICY:KHZ",
@@ -201,10 +207,21 @@ def main():
     clocks = "fixed" if freqs else "performance" if lock else governor or "unknown"  # unreadable without root on some phones
     opts.out.parent.mkdir(parents=True, exist_ok=True)
     new_file = not opts.out.exists()
+    fields = FIELDS
     if not new_file:
         with open(opts.out) as f:
-            if next(csv.reader(f), None) != FIELDS:
-                raise SystemExit(f"{opts.out} has other columns (written by an older bench.py); use a new --out file")
+            header = next(csv.reader(f), None)
+        if header == OLD_FIELDS:
+            if opts.decoder != "dav2d":
+                raise SystemExit(f"{opts.out} has no decoder column (older bench.py, dav2d only); "
+                                 f"use a new --out file for {opts.decoder}")
+            fields = OLD_FIELDS
+            print(f"{opts.out} has no decoder column (older bench.py); appending in its columns", flush=True)
+        elif header != FIELDS:
+            raise SystemExit(f"{opts.out} has other columns (written by an older bench.py); use a new --out file")
+    binary = f"{PHONE_DIR}/{opts.decoder}"
+    if adb(opts.serial, f"test -x {binary} && echo yes", check=False) != "yes":
+        raise SystemExit(f"{binary} is not on the phone; run scripts/install_phone.sh {opts.serial} {opts.decoder}")
     original_limits = read_limits(opts.serial) if freqs else {}
     # Policy numbers, in the same order as the policy* glob on the phone (single digits)
     policies = sorted(int(d.rsplit("policy", 1)[1]) for d in adb(opts.serial, f"ls -d {CPUFREQ}/policy*").split())
@@ -224,28 +241,28 @@ def main():
         set_usb_input(opts.serial, enabled=False)
     try:
         with open(opts.out, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new_file:
                 writer.writeheader()
             for stream in opts.streams:
                 remote = push_if_needed(opts.serial, stream)
                 md5 = stream.with_suffix(".md5").read_text().split()[0]
-                md5_ok = adb(opts.serial, f"{DAV2D} -q -i {remote} --verify {md5}; echo $?", check=False).endswith("0")
+                md5_ok = adb(opts.serial, f"{binary} -q -i {remote} --verify {md5}; echo $?", check=False).split()[-1] == "0"
                 print(f"{stream.name}: MD5 {'OK' if md5_ok else 'MISMATCH'}", flush=True)
                 for threads in opts.threads:
                     for run in range(1, opts.runs + 1):
                         cool_down(opts.serial, opts.cooldown_c, opts.cooldown_timeout)
                         time.sleep(opts.pause)
                         t_before = max_cpu_temp(opts.serial)
-                        wall_s, frametimes, power_mw, ranges = timed_run(opts.serial, remote, threads, opts.cpumask,
-                                                                          opts.cpus)
+                        wall_s, frametimes, power_mw, ranges = timed_run(opts.serial, opts.decoder, remote, threads,
+                                                                          opts.cpumask, opts.cpus)
                         freq_seen = format_ranges(policies, ranges) if ranges else current_freqs(opts.serial)
                         moved = [f"policy{p}" for p, (lo, hi) in zip(policies, ranges)
                                  if p in freqs and not lo == hi == freqs[p]]
                         t_after = max_cpu_temp(opts.serial)
                         row = {
                             "date": datetime.now().isoformat(timespec="seconds"),
-                            "device": device, "stream": stream.name, "threads": threads,
+                            "device": device, "decoder": opts.decoder, "stream": stream.name, "threads": threads,
                             "cpumask": opts.cpumask if opts.cpumask is not None else "all",
                             "cpus": opts.cpus or "all", "clocks": clocks, "freq_khz": freq_seen,
                             "power_source": power_source,
