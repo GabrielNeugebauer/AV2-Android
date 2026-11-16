@@ -5,26 +5,22 @@ decode with the null muxer, one at a time, with a cool-down in between. Each tim
 measured on the phone, the per-frame times from the decoder, the highest CPU temperature before and after, and the
 average battery power during the run.
 
-Usage (from the AV2-Android folder):
-    python scripts/bench.py --serial e113b3850013 --streams streams/*.obu --runs 5 --threads 1 8 \
-        --out results/bench.csv [--lock-clocks] [--battery-power] [--cpumask 0] [--freq 0:1017600] [--cpus 0-5]
-    python scripts/bench.py --serial e113b3850013 --decoder dav1d --streams streams/<av1 set>/*.ivf --out results/av1.csv
+Interactive: python3 scripts/bench.py
+It asks for the phone, the decoder, the streams (files under streams/ with a .md5 next to them, written by
+make_streams.py or make_av1_streams.py), the threads, the number of runs, the code path (--cpumask), the cores
+(taskset), and, with root, battery power, a fixed frequency for one CPU cluster and the governor.
 
-Power is only meaningful with --battery-power: while the USB cable charges the phone, the battery current includes
-the charging current. --battery-power pauses the USB input (root) so the phone runs on battery, keeping adb connected.
+Power is only meaningful on battery: while the USB cable charges the phone, the battery current includes the charging
+current. Running on battery pauses the USB input (root) and keeps adb connected. scripts/freq_sweep.py runs this
+for every frequency of one cluster.
 
---freq pins a CPU cluster at one frequency (root) and --cpus keeps the decoder on chosen cores (taskset); together they
-measure how decoding scales with clock speed on one core type. scripts/freq_sweep.sh runs that for every frequency.
-
-The phone must already have the decoder in /data/local/tmp/av2 (scripts/install_phone.sh pushes it). Each stream needs
-a <stream>.md5 next to it (scripts/make_streams.py writes it). The CSV columns are described in README.md.
-
-CSVs written before the decoder column existed are still appended to, in their own columns, when the decoder is dav2d
-(all their rows are dav2d); dav1d runs need a CSV with the decoder column.
+The phone must already have the decoder in /data/local/tmp/av2 (scripts/install_phone.py pushes it). The CSV columns
+are described in README.md. CSVs written before the decoder column existed are still appended to, in their own
+columns, when the decoder is dav2d (all their rows are dav2d); dav1d runs need a CSV with the decoder column.
 """
 
-import argparse
 import csv
+import os
 import shlex
 import signal
 import statistics
@@ -33,6 +29,10 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+
+from interativo import (ROOT, adb_shell, ask_number, ask_numbers, ask_text, ask_yes, choose_phone,
+                        confirm_or_exit, has_root, menu, pick_files, title)
 
 PHONE_DIR = "/data/local/tmp/av2"
 CPUFREQ = "/sys/devices/system/cpu/cpufreq"
@@ -100,18 +100,6 @@ def format_ranges(policies, ranges):
     return " ".join(f"{p}:{lo}" if lo == hi else f"{p}:{lo}-{hi}" for p, (lo, hi) in zip(policies, ranges))
 
 
-def parse_freqs(serial, specs):
-    """'0:1017600' -> {0: 1017600}, checked against the policy's available frequencies."""
-    freqs = {}
-    for spec in specs:
-        policy, khz = (int(x) for x in spec.split(":"))
-        available = adb(serial, f"cat {CPUFREQ}/policy{policy}/scaling_available_frequencies").split()
-        if str(khz) not in available:
-            raise SystemExit(f"policy{policy} has no {khz} kHz step; available: {' '.join(available)}")
-        freqs[policy] = khz
-    return freqs
-
-
 def cpu_mask(cpus):
     """'0-5' or '6,7' -> hex affinity mask for taskset ('3f', 'c0')."""
     mask = 0
@@ -176,32 +164,92 @@ def timed_run(serial, decoder, remote, threads, cpumask, cpus=None):
     return wall_s, frametimes, power_mw, freq_ranges
 
 
-def main():
-    # A stop signal (e.g. from a task runner) exits through the finally block, so the phone is restored.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--serial", required=True)
-    ap.add_argument("--decoder", choices=["dav2d", "dav1d"], default="dav2d",
-                    help="dav2d for AV2 streams, dav1d for AV1 streams (the AV1 comparison)")
-    ap.add_argument("--streams", nargs="+", type=Path, required=True,
-                    help="AV2 .obu files (or AV1 .ivf with --decoder dav1d); the expected MD5 is read from <stream>.md5")
-    ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--threads", type=int, nargs="+", default=[1])
-    ap.add_argument("--cpumask", default=None, help="passed to the decoder's --cpumask (0 = plain C only, neon, dotprod, i8mm)")
-    ap.add_argument("--lock-clocks", action="store_true", help="set the 'performance' governor during the runs (root)")
-    ap.add_argument("--battery-power", action="store_true", help="pause USB charging during the runs (root)")
-    ap.add_argument("--freq", nargs="+", metavar="POLICY:KHZ",
-                    help="pin CPU policies at one frequency, e.g. 0:1017600 (root); other policies run at maximum")
-    ap.add_argument("--cpus", help="run the decoder only on these cores, e.g. 0-5 (A55) or 6-7 (A76) on the Redmi")
-    ap.add_argument("--cooldown-c", type=float, default=40.0, help="wait until the CPU is below this temperature")
-    ap.add_argument("--cooldown-timeout", type=float, default=180.0)
-    ap.add_argument("--pause", type=float, default=0.0,
-                    help="fixed pause before each run, in seconds; use it on phones whose temperatures are not readable")
-    ap.add_argument("--out", type=Path, default=Path("results/bench.csv"))
-    opts = ap.parse_args()
+def read_policies(serial):
+    """CPU clusters: {policy: (cores as '0,1,2', [available frequencies in kHz])}; the list is empty if unreadable."""
+    out = adb(serial, f"for p in {CPUFREQ}/policy*; do echo \"${{p##*policy}}|$(cat $p/related_cpus)|"
+                      f"$(cat $p/scaling_available_frequencies 2>/dev/null)\"; done", check=False)
+    policies = {}
+    for line in out.splitlines():
+        policy, cpus, freqs = (line.split("|") + ["", ""])[:3]
+        if policy.isdigit():
+            policies[int(policy)] = (",".join(cpus.split()), [int(f) for f in freqs.split() if f.isdigit()])
+    return dict(sorted(policies.items()))
 
+
+def cores_label(cpus):
+    """'0,1,2,3,4,5' -> '0-5' when the cores are consecutive."""
+    ids = [int(c) for c in cpus.split(",")]
+    return f"{ids[0]}-{ids[-1]}" if len(ids) > 1 and ids == list(range(ids[0], ids[-1] + 1)) else cpus
+
+
+def choose_decoder_and_streams(serial):
+    decoder = ["dav2d", "dav1d"][menu("DECODIFICADOR", ["dav2d (AV2, streams .obu)", "dav1d (AV1, streams .ivf)"],
+                                      "Selecione (em branco = 1): ", default=0)]
+    if adb_shell(serial, f"test -x {PHONE_DIR}/{decoder}")[0] != 0:
+        raise SystemExit(f"{PHONE_DIR}/{decoder} não está no celular: rode python3 scripts/install_phone.py")
+    streams = pick_files("STREAMS (com .md5)", ROOT / "streams", {".obu"} if decoder == "dav2d" else {".ivf"},
+                         need_md5=True)
+    return decoder, streams
+
+
+def ask_cooldown(serial):
+    """(target °C, pause s): cool down to a temperature, or a fixed pause when the temperature is unreadable."""
+    temp = max_cpu_temp(serial)
+    if temp == temp:  # not NaN
+        return ask_number(f"Esfriar até quantos °C antes de cada execução (agora {temp:.1f} °C)", 40.0, float), 0.0
+    print("A temperatura da CPU não é legível neste celular; use uma pausa fixa entre as execuções.")
+    return 40.0, ask_number("Pausa antes de cada execução, em segundos", 10.0, float, minimum=0)
+
+
+def ask_options():
+    serial = choose_phone()
+    decoder, streams = choose_decoder_and_streams(serial)
+    title("EXECUÇÃO")
+    threads = ask_numbers("Threads do decodificador", [1])
+    runs = ask_number("Execuções por stream e número de threads", 5, minimum=1)
+    cpumask = [None, "0", "neon", "dotprod", "i8mm"][menu("CÓDIGO (--cpumask)", [
+        "Todas as otimizações (assembly)", "C puro (--cpumask 0)", "Até NEON (--cpumask neon)",
+        "Até dotprod (--cpumask dotprod)", "Até i8mm (--cpumask i8mm)"], "Selecione (em branco = 1): ", default=0)]
+    policies = read_policies(serial)
+    rows = ["Todos os núcleos"] + [f"Núcleos {cores_label(c)} (policy{p})" for p, (c, _) in policies.items()]
+    sel = menu("NÚCLEOS (taskset)", rows, "Selecione (em branco = 1): ", default=0)
+    cpus = list(policies.values())[sel - 1][0] if sel else None
+
+    freqs, lock, battery = {}, False, False
+    if has_root(serial):
+        battery = ask_yes("\nRodar na bateria (pausa a carga pela USB, para medir a potência)? [S/n]: ", default=True)
+        fixable = [p for p, (_, f) in policies.items() if f]
+        sel = menu("FREQUÊNCIA", ["Não fixar"] + [f"Fixar a policy{p} (núcleos {cores_label(policies[p][0])})"
+                                                  for p in fixable], "Selecione (em branco = 1): ", default=0)
+        if sel:
+            policy = fixable[sel - 1]
+            steps = policies[policy][1]
+            khz = steps[menu(f"FREQUÊNCIA DA policy{policy}", [f"{f / 1000:.0f} MHz ({f} kHz)" for f in steps],
+                             "Selecione: ")]
+            freqs = {policy: khz}
+        lock = bool(freqs) or ask_yes("Fixar o governor em 'performance' durante as execuções? [s/N]: ")
+    else:
+        print("\nSem root: governor, frequência e carga pela USB ficam como estão (a potência inclui a carga).")
+    cooldown, pause = ask_cooldown(serial)
+    out = Path(ask_text("Arquivo CSV de saída", "results/bench.csv"))
+    return SimpleNamespace(serial=serial, decoder=decoder, streams=streams, runs=runs, threads=threads,
+                           cpumask=cpumask, lock_clocks=lock, battery_power=battery, freqs=freqs, cpus=cpus,
+                           cooldown_c=cooldown, cooldown_timeout=180.0, pause=pause, out=out)
+
+
+def describe(opts):
+    title("RESUMO")
+    print(f"{opts.decoder}, {len(opts.streams)} stream(s), threads {opts.threads}, {opts.runs} execuções")
+    print(f"código: {opts.cpumask or 'todas as otimizações'}; núcleos: {cores_label(opts.cpus) if opts.cpus else 'todos'}; "
+          f"frequência: {', '.join(f'policy{p} {k} kHz' for p, k in opts.freqs.items()) or 'livre'}; "
+          f"bateria: {'sim' if opts.battery_power else 'não'}")
+    print(f"saída: {opts.out}")
+
+
+def run(opts):
+    """Runs the benchmark described by opts (see ask_options) and appends the rows to opts.out."""
     device = adb(opts.serial, "getprop ro.product.model")
-    freqs = parse_freqs(opts.serial, opts.freq) if opts.freq else {}
+    freqs = opts.freqs
     lock = opts.lock_clocks or bool(freqs)
     governor = adb(opts.serial, f"cat {CPUFREQ}/policy0/scaling_governor 2>/dev/null", check=False)
     clocks = "fixed" if freqs else "performance" if lock else governor or "unknown"  # unreadable without root on some phones
@@ -214,14 +262,14 @@ def main():
         if header == OLD_FIELDS:
             if opts.decoder != "dav2d":
                 raise SystemExit(f"{opts.out} has no decoder column (older bench.py, dav2d only); "
-                                 f"use a new --out file for {opts.decoder}")
+                                 f"choose another output CSV for {opts.decoder}")
             fields = OLD_FIELDS
             print(f"{opts.out} has no decoder column (older bench.py); appending in its columns", flush=True)
         elif header != FIELDS:
-            raise SystemExit(f"{opts.out} has other columns (written by an older bench.py); use a new --out file")
+            raise SystemExit(f"{opts.out} has other columns (written by an older bench.py); choose another output CSV")
     binary = f"{PHONE_DIR}/{opts.decoder}"
     if adb(opts.serial, f"test -x {binary} && echo yes", check=False) != "yes":
-        raise SystemExit(f"{binary} is not on the phone; run scripts/install_phone.sh {opts.serial} {opts.decoder}")
+        raise SystemExit(f"{binary} is not on the phone; run python3 scripts/install_phone.py")
     original_limits = read_limits(opts.serial) if freqs else {}
     # Policy numbers, in the same order as the policy* glob on the phone (single digits)
     policies = sorted(int(d.rsplit("policy", 1)[1]) for d in adb(opts.serial, f"ls -d {CPUFREQ}/policy*").split())
@@ -289,5 +337,19 @@ def main():
             set_clocks(opts.serial, "schedutil")
 
 
+
+def main():
+    # A stop signal (e.g. from a task runner) exits through the finally block, so the phone is restored.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    os.chdir(ROOT)
+    opts = ask_options()
+    describe(opts)
+    confirm_or_exit()
+    run(opts)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")

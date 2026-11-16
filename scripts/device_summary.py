@@ -1,11 +1,10 @@
-"""Turns the raw files written by scripts/device_info.sh into summary.md and summary.json.
+"""Turns the raw files written by scripts/device_info.py into summary.md and summary.json.
 
 The summary answers what the benchmark needs to know about a phone: which cores it has and how they are grouped,
 what bench.py can read or set without root, whether it already has an AV1 hardware decoder, and which GPU and DSP
-the offload work could use. It ends with suggested bench.py options.
+the offload work could use. It ends with suggested answers to the bench.py questions.
 
-Usage (from the AV2-Android folder):
-    python3 scripts/device_summary.py devices/sweet2
+Interactive: python3 scripts/device_summary.py   (picks a phone folder under devices/ or results/; device_info.py runs it too)
 """
 
 import json
@@ -232,36 +231,37 @@ def summarize(d):
         "av2_codecs": sorted(n for n, c in codecs.items() if c["type"] != "video/av01"),
         "gpu": parse_gpu(d), "dsp": parse_dsp(d),
     }
-    s["bench_flags"] = bench_flags(s)
+    s["bench_choices"] = bench_choices(s)
     return s
 
 
-def bench_flags(s):
-    """Suggested bench.py options for this phone, as (options, why) pairs."""
+def bench_choices(s):
+    """Suggested answers to the bench.py questions for this phone, as (choice, why) pairs."""
     out = []
     if not s["arm64"]:
-        out.append(("(none)", "no arm64-v8a ABI: the arm64 dav2d build will not run; an armv7 build is needed"))
+        out.append(("(none)", "no arm64-v8a ABI: the arm64 dav2d build will not run; install the armv7 build"))
     for c in s["clusters"]:
-        out.append((f"--cpus {c['cpus']}", f"{c['count']}x {c['core']} only (policy{c['policy']})"))
+        out.append((f"Cores {c['cpus']}", f"{c['count']}x {c['core']} only (policy{c['policy']})"))
     if s["thermal"]["cpu_zones_readable"]:
-        out.append(("--cooldown-c <T>", f"cpu-* thermal zones readable ({s['thermal']['cpu_max_c']} °C when collected); "
-                                        "set T a few degrees above the idle temperature with the clocks used"))
+        out.append(("Cool-down temperature", f"cpu-* thermal zones readable ({s['thermal']['cpu_max_c']} °C when "
+                                             "collected); a few degrees above the idle temperature with the clocks used"))
     else:
-        out.append(("--pause 30", "no readable cpu-* thermal zone, so the --cooldown-c wait cannot work"))
+        out.append(("Pause of 30 s", "no readable cpu-* thermal zone: bench.py asks for a fixed pause instead"))
     if s["root"]:
-        out.append(("--lock-clocks", "root: the governor can be set"))
+        out.append(("Governor 'performance'", "root: the governor can be set"))
         if any(c["freqs_khz"] for c in s["clusters"]):
-            out.append(("--freq POLICY:KHZ", "root: pins a policy at one of its frequency steps (listed below); "
-                                             "scripts/freq_sweep.sh runs every step"))
+            out.append(("Fixed frequency", "root: pins a policy at one of its frequency steps (listed below); "
+                                           "scripts/freq_sweep.py runs every step"))
         if s["power"]["input_suspend"] and s["power"]["current_now"]:
-            out.append(("--battery-power", "root and battery/input_suspend: power readings on battery"))
+            out.append(("Run on battery", "root and battery/input_suspend: power readings on battery"))
         elif s["power"]["charge_controls"]:
             out.append(("(none)", f"charging is paused through {s['power']['charge_controls'][0]}, which bench.py does not use"))
     else:
-        out.append(("(none)", "no root: no --lock-clocks, --freq or --battery-power; power readings include charging"))
+        out.append(("(none)", "no root: bench.py skips the governor, frequency and battery questions; "
+                              "power readings include charging"))
     feats = set.intersection(*(set(c["cpumask_features"]) for c in s["clusters"])) if s["clusters"] else set()
     masks = ["0"] + [f for f in ("neon", "dotprod", "i8mm", "sve", "sve2") if f in feats]
-    out.append((" / ".join(f"--cpumask {m}" for m in masks), "code paths every core supports (0 = plain C)"))
+    out.append(("Code: " + " / ".join(f"--cpumask {m}" for m in masks), "code paths every core supports (0 = plain C)"))
     return out
 
 
@@ -305,8 +305,8 @@ def markdown(s):
     ]
     lines = [f"# {s['manufacturer']} {s['model']}", "", "| | |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in rows]
-    lines += ["", "## Suggested bench.py options", "", "| Option | Why |", "|---|---|"]
-    lines += [f"| `{o}` | {w} |" if not o.startswith("(") else f"| — | {w} |" for o, w in s["bench_flags"]]
+    lines += ["", "## Suggested bench.py choices", "", "| Choice | Why |", "|---|---|"]
+    lines += [f"| {o} | {w} |" if not o.startswith("(") else f"| — | {w} |" for o, w in s["bench_choices"]]
     lines += ["", "## Frequency steps (kHz)", ""]
     lines += [f"- policy{c['policy']} ({c['core']}): {' '.join(map(str, c['freqs_khz'])) or 'not readable'}"
               for c in s["clusters"]]
@@ -321,5 +321,17 @@ def main(path):
     print(markdown(s))
 
 
+def choose_and_summarize():
+    from interativo import ROOT, menu
+    folders = sorted(p.parent for base in ("devices", "results") for p in (ROOT / base).glob("*/raw"))
+    if not folders:
+        sys.exit("Nenhuma pasta <celular>/raw em devices/ ou results/: rode python3 scripts/device_info.py primeiro.")
+    main(folders[menu("CELULARES", [str(f.relative_to(ROOT)) for f in folders], "Selecione (em branco = 1): ",
+                      default=0)])
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    try:
+        choose_and_summarize()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")

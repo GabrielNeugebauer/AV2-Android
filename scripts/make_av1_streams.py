@@ -4,28 +4,30 @@ The AV1 counterpart of make_streams.py, for the AV1 vs. AV2 comparison. For ever
 converts it to 8 bit with ffmpeg (the same file make_streams.py uses), encodes the first N frames at a fixed QP with a
 GOP close to the AVM random-access settings (16-frame mini-GOP, key frame every 65 frames, no TPL, no adaptive
 quantization), then decodes the stream to write <stream>.md5 in the form dav1d's md5 muxer prints, which bench.py
-checks on the phone. With --psnr it also measures the decoded stream against its source and appends a row to
+checks on the phone. Optionally it also measures the decoded stream against its source and appends a row to
 <out>/quality.csv.
 
-Usage (from the AV2-Android folder):
-    python scripts/make_av1_streams.py reference_videos/SparksElevator_480x270p_5994_10bit.y4m \
-        --encoder svtav1 --qp 40 --frames 17 --bitdepth 10 8 --preset 8 --out streams/poc_av1 --psnr
+Interactive: python3 scripts/make_av1_streams.py
+It asks for the sources (.y4m under reference_videos/), the encoder, the bit depths, the QPs, the number of frames,
+the speed preset, the threads, whether to measure PSNR and the output folder. The smallest sources are encoded first.
 
 Stream names follow <video>_<height>p_<bits>bit_<encoder>_q<QP>_f<frames>_p<preset>.ivf; the encoder log is kept as
 .enc.log.
 """
 
-import argparse
 import csv
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
+from interativo import ask_number, ask_numbers, ask_text, ask_yes, confirm_or_exit, menu, pick_files, title
+
 HERE = Path(__file__).resolve().parent.parent
 DAV1D = HERE / "build/dav1d-x86/tools/dav1d"
-GOP = 65       # --kf-min-dist / --kf-max-dist in Scripts-ViTech/AVM/cfg/random_access.cfg
+GOP = 65       # --kf-min-dist / --kf-max-dist in Scripts-ViTech/AVM/cfg/av2/random_access.cfg
 MINI_GOP = 16  # --min-gf-interval / --max-gf-interval
 LAG = 19       # --lag-in-frames
 
@@ -84,54 +86,60 @@ def psnr(ivf, source, frames):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inputs", nargs="+", type=Path, help=".y4m sources")
-    ap.add_argument("--encoder", choices=["libaom", "svtav1"], default="svtav1")
-    ap.add_argument("--qp", type=int, nargs="+", default=[40], help="AV1 QP, 0-63 (higher = lower bitrate)")
-    ap.add_argument("--frames", type=int, default=33)
-    ap.add_argument("--bitdepth", type=int, nargs="+", default=[10], choices=[8, 10])
-    ap.add_argument("--preset", type=int, default=None,
-                    help="speed preset: libaom cpu-used 0-8 (default 0), SVT-AV1 preset 0-13 (default 2)")
-    ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument("--psnr", action="store_true", help="append PSNR of each stream to <out>/quality.csv")
-    ap.add_argument("--out", type=Path, default=Path("streams"))
-    opts = ap.parse_args()
-    preset = opts.preset if opts.preset is not None else 0 if opts.encoder == "libaom" else 2
+    os.chdir(HERE)
+    inputs = sorted(pick_files("FONTES (.y4m)", HERE / "reference_videos", {".y4m"}), key=lambda p: p.stat().st_size)
+    encoder = ["svtav1", "libaom"][menu("ENCODER (pelo ffmpeg)", ["SVT-AV1", "libaom"], "Selecione (em branco = 1): ",
+                                        default=0)]
+    depths = [[10], [8], [10, 8]][menu("BIT DEPTH", ["10 bits", "8 bits (converte a fonte com ffmpeg)", "10 e 8 bits"],
+                                       "Selecione (em branco = 1): ", default=0)]
+    title("CODIFICAÇÃO")
+    qps = ask_numbers("QPs do AV1, 0-63 (maior = menos bitrate)", [40])
+    frames = ask_number("Frames", 33, minimum=1)
+    preset = ask_number("Preset (libaom cpu-used 0-8, SVT-AV1 0-13; maior = mais rápido)",
+                        0 if encoder == "libaom" else 2, minimum=0)
+    threads = ask_number("Threads do encoder", 8, minimum=1)
+    with_psnr = ask_yes("Medir o PSNR de cada stream (grava <saída>/quality.csv)? [s/N]: ")
+    out = Path(ask_text("Pasta de saída", "streams"))
+    print(f"\n{len(inputs) * len(depths) * len(qps)} stream(s) com {encoder}")
+    confirm_or_exit()
 
-    opts.out.mkdir(parents=True, exist_ok=True)
-    quality = opts.out / "quality.csv"
-    for src in opts.inputs:
-        for depth in opts.bitdepth:
-            source = src if depth == 10 else to_8bit(src, opts.out / f"{src.stem}_8bit.y4m")
+    out.mkdir(parents=True, exist_ok=True)
+    quality = out / "quality.csv"
+    for src in inputs:
+        for depth in depths:
+            source = src if depth == 10 else to_8bit(src, out / f"{src.stem}_8bit.y4m")
             height, fps = y4m_header(src)
-            for qp in opts.qp:
-                name = f"{src.stem.split('_')[0]}_{height}p_{depth}bit_{opts.encoder}_q{qp}_f{opts.frames}_p{preset}"
-                ivf = opts.out / f"{name}.ivf"
-                cmd = ["ffmpeg", "-y", "-i", str(source), "-frames:v", str(opts.frames),
-                       *encoder_args(opts.encoder, qp, preset, opts.threads),
+            for qp in qps:
+                name = f"{src.stem.split('_')[0]}_{height}p_{depth}bit_{encoder}_q{qp}_f{frames}_p{preset}"
+                ivf = out / f"{name}.ivf"
+                cmd = ["ffmpeg", "-y", "-i", str(source), "-frames:v", str(frames),
+                       *encoder_args(encoder, qp, preset, threads),
                        "-pix_fmt", "yuv420p" if depth == 8 else "yuv420p10le", str(ivf)]
                 t0 = time.time()
-                log = opts.out / f"{name}.enc.log"
+                log = out / f"{name}.enc.log"
                 with open(log, "w") as f:
                     f.write(" ".join(cmd) + "\n\n")  # the ffmpeg banner and encoder version follow
                     f.flush()
                     subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=True, env={**os.environ, "SVT_LOG": "3"})
                 elapsed = time.time() - t0
                 md5 = stream_md5(ivf, depth)
-                (opts.out / f"{name}.md5").write_text(md5 + "\n")
-                kbps = ivf.stat().st_size * 8 / 1000 / (opts.frames / fps)
+                (out / f"{name}.md5").write_text(md5 + "\n")
+                kbps = ivf.stat().st_size * 8 / 1000 / (frames / fps)
                 line = f"{ivf.name}: {ivf.stat().st_size / 1024:.0f} KiB, {kbps:.0f} kbps, encoded in {elapsed:.0f} s, md5 {md5}"
-                if opts.psnr:
-                    psnr_y, psnr_yuv = psnr(ivf, source, opts.frames)
+                if with_psnr:
+                    psnr_y, psnr_yuv = psnr(ivf, source, frames)
                     new = not quality.exists()
                     with open(quality, "a", newline="") as f:
                         w = csv.writer(f)
                         if new:
                             w.writerow(["stream", "encoder", "qp", "bitdepth", "frames", "kbps", "psnr_y", "psnr_yuv"])
-                        w.writerow([ivf.name, opts.encoder, qp, depth, opts.frames, round(kbps, 1), psnr_y, psnr_yuv])
+                        w.writerow([ivf.name, encoder, qp, depth, frames, round(kbps, 1), psnr_y, psnr_yuv])
                     line += f", PSNR Y {psnr_y:.2f} dB, YUV {psnr_yuv:.2f} dB"
                 print(line)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")

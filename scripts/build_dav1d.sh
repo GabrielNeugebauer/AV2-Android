@@ -2,12 +2,18 @@
 # Builds dav1d (AV1, for the comparison with AV2) in the same layout as dav2d:
 #   arm64, armv7: build/dav1d-<arch> (release decoder, tools/dav1d) and build/dav1d-<arch>-checkasm (-Dtrim_dsp=false)
 #   host:         build/dav1d-x86 for the PC, to compute the reference MD5 of AV1 streams
-# Usage: scripts/build_dav1d.sh [arm64|armv7|host]   (default arm64)
+# Usage: scripts/build_dav1d.sh [arm64|armv7|host]   (without an argument, in a terminal, it asks)
 # The host build needs nasm for its x86 assembly. NOASM=1 builds plain C instead (same output, slower, no checkasm).
 # Re-running only rebuilds what changed. Set RECONFIGURE=1 after changing env.sh or the NDK.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ARCH=${1:-arm64}
+if [ $# -eq 0 ] && [ -t 0 ]; then
+    echo "Arquitetura: [1] arm64  [2] armv7  [3] host (PC)"
+    read -rp "Selecione (em branco = 1): " choice
+    case $choice in 2) ARCH=armv7 ;; 3) ARCH=host ;; *) ARCH=arm64 ;; esac
+else
+    ARCH=${1:-arm64}
+fi
 source scripts/env.sh
 SRC=src/dav1d
 [ -d "$SRC" ] || { echo "$SRC missing: run scripts/fetch_sources.sh" >&2; exit 1; }

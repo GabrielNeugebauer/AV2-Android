@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Cross-compiles dav2d for Android: build/dav2d-<arch> (release decoder, tools/dav2d, used for benchmarks) and
 # build/dav2d-<arch>-checkasm (-Dtrim_dsp=false: checkasm needs the plain C functions that release builds remove).
-# Usage: scripts/build_dav2d.sh [arm64|armv7]   (default arm64)
+# Usage: scripts/build_dav2d.sh [arm64|armv7]   (without an argument, in a terminal, it asks)
 # Re-running only rebuilds what changed. Set RECONFIGURE=1 after changing env.sh or the NDK.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ARCH=${1:-arm64}
+if [ $# -eq 0 ] && [ -t 0 ]; then
+    echo "Arquitetura: [1] arm64  [2] armv7"
+    read -rp "Selecione (em branco = 1): " choice
+    case $choice in 2) ARCH=armv7 ;; *) ARCH=arm64 ;; esac
+else
+    ARCH=${1:-arm64}
+fi
 source scripts/env.sh
 SRC=src/dav2d CROSS=build/android-$ARCH.meson
 [ -d "$SRC" ] || { echo "$SRC missing: run scripts/fetch_sources.sh" >&2; exit 1; }

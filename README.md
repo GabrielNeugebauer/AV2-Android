@@ -5,8 +5,8 @@ Measures how well Android phones without AV2 hardware decode AV2 in software wit
 ```
 PC                                                       phone (adb)
 scripts/bootstrap.sh → src/ (pinned clones) → build/ (dav2d, dav1d, AVM)
-  scripts/install_phone.sh ──────────────────────────────→ /data/local/tmp/av2/{dav2d,dav1d,checkasm*}
-  scripts/device_info.sh  ←──────────────────────────────── props, CPU clusters, thermal, power, codecs, GPU
+  scripts/install_phone.py ──────────────────────────────→ /data/local/tmp/av2/{dav2d,dav1d,checkasm*}
+  scripts/device_info.py  ←──────────────────────────────── props, CPU clusters, thermal, power, codecs, GPU
        → devices/<codename>/summary.md
 reference_videos/*.y4m
   ├─ scripts/make_streams.py      (AVM encoder + reference decoder)
@@ -29,21 +29,21 @@ reference_videos/*.y4m
 | `build/dav1d-x86/`                         | dav1d for the PC: reference MD5s of AV1 streams                                                                                    |
 | `build/avm-x86/`                           | AVM encoder and decoder for the PC, optimized and multithreaded (`avmenc`, `avmdec`)                                               |
 | `build/avm/`                               | AVM built without `AVM_TARGET_CPU`: plain C, single-threaded, many times slower. Not used                                          |
-| `devices/`                                 | One folder per phone from `scripts/device_info.sh`: raw adb outputs and `summary.md` / `summary.json`                              |
+| `devices/`                                 | One folder per phone from `scripts/device_info.py`: raw adb outputs and `summary.md` / `summary.json`                              |
 | `reference_videos/`                        | Source sequences (`.y4m`)                                                                                                          |
 | `streams/`                                 | Encoded test streams, one folder per set: AV2 `.obu` or AV1 `.ivf`, each with its `.md5` and `.enc.log`                            |
 | `results/`                                 | Benchmark CSVs                                                                                                                     |
-| `scripts/`                                 | The scripts below                                                                                                                  |
+| `scripts/`                                 | The scripts below; `interativo.py` holds the menus they share                                                                      |
 | `tools_html2docx.py`                       | Regenerates the proposal `.docx` from `proposal.html`                                                                              |
 | `.venv/`                                   | Python environment with meson, created by `scripts/setup_host.sh`                                                                  |
 
 ## Phone requirements
 
-- USB debugging on, `adb devices` lists the phone. Pass its serial to the scripts (`e113b3850013` for the Redmi Note 12 Pro 4G, `SM02G4061988026` for the Seeker).
-- Run `scripts/device_info.sh <serial>` once per phone: its `summary.md` says what the phone allows (root, readable temperatures and clocks, battery files, 32-bit only) and which `bench.py` options to use.
+- USB debugging on, `adb devices` lists the phone. The scripts list the connected phones and ask which one to use (`e113b3850013` is the Redmi Note 12 Pro 4G, `SM02G4061988026` the Seeker).
+- Run `scripts/device_info.py` once per phone: its `summary.md` says what the phone allows (root, readable temperatures and clocks, battery files, 32-bit only) and what to answer in `bench.py`.
 - Nothing needs root to decode: binaries and streams live in `/data/local/tmp/av2`.
 - Without root (the Seeker) the runner still checks MD5s and records times and the frequencies seen, but cannot lock clocks, pause charging or read temperatures; power readings are taken while charging and are not meaningful. Core numbering differs per phone: Redmi 0-5 A55 / 6-7 A76; Seeker 0-3 A55 / 4-7 A78.
-- `--lock-clocks`, `--battery-power` and `--freq` need root over adb. With KernelSU, allow **Shell** under Superuser; check with `adb shell su -c id`.
+- The governor, fixed-frequency and battery questions of `bench.py` need root over adb; without it the script skips them. With KernelSU, allow **Shell** under Superuser; check with `adb shell su -c id`.
 
 ## Setting up from scratch
 
@@ -55,8 +55,8 @@ On a new PC, `scripts/bootstrap.sh` runs every step below in order. Each step sk
 | 2 | `scripts/fetch_sources.sh [name...]` | Clones `dav2d`, `dav2d-test-data`, `dav1d`, `avm` (branch `av2-normative`) and `libaom` (`v3.15.3`) into `src/` and checks out the pinned commits. Clones that are already at their pin are left alone; one at another commit is moved to the pin only if it has no local changes |
 | 3 | `scripts/build_avm.sh` | AVM encoder and reference decoder for the PC (`build/avm-x86/avmenc`, `avmdec`), optimized and multithreaded |
 | 3b | `scripts/build_libaom.sh` | libaom AV1 encoder and decoder for the PC (`build/libaom-x86/aomenc`, `aomdec`), used by `Scripts-ViTech/AVM/run_avm.py` for the CTC v9 AV1 encodes |
-| 4 | `scripts/build_dav2d.sh [arm64\|armv7]` | dav2d for the phone: the release decoder and the checkasm build |
-| 5 | `scripts/build_dav1d.sh [arm64\|armv7\|host]` | dav1d (AV1, for the comparison) for the phone in the same layout, or `host` for the PC, to compute the reference MD5 of AV1 streams |
+| 4 | `scripts/build_dav2d.sh [arm64\|armv7]` | dav2d for the phone: the release decoder and the checkasm build. Run in a terminal without an argument, it asks for the architecture |
+| 5 | `scripts/build_dav1d.sh [arm64\|armv7\|host]` | dav1d (AV1, for the comparison) for the phone in the same layout, or `host` for the PC, to compute the reference MD5 of AV1 streams. Without an argument, it asks |
 
 `scripts/env.sh` holds the shared settings and the build scripts source it. `scripts/make_cross_file.sh <arm64|armv7> <out.meson>` writes the meson cross file from those settings (`build/android-arm64.meson`, `build/android-armv7.meson`). The build scripts call it themselves, and it only rewrites the file when the content changes, so ninja does not reconfigure the builds for nothing.
 
@@ -100,21 +100,18 @@ If the NDK is missing: `sdkmanager --sdk_root=$HOME/Android/Sdk 'ndk;28.2.136763
 
 ## Scripts
 
-### `scripts/device_info.sh <serial> [out_dir]`
+The scripts that need choices are interactive, in the same pattern as the Scripts-ViTech runners: run them with no arguments (`.venv/bin/python scripts/<name>.py` or `python3 scripts/<name>.py`, from any folder) and they ask in the terminal, in Portuguese, with numbered menus. Selections accept lists and ranges (`1,2,3` or `1-3,5`), and a blank answer takes the default shown in the prompt. Each one shows a summary and asks `Iniciar? [s/N]` before it changes anything. Ctrl+C cancels.
 
-Records a phone's specifications over adb, in one pass, for the device table of the article and to choose the `bench.py` options for that phone. It works without root. When `adb shell su -c id` returns root, it also reads cpufreq, thermal zones and the DSP folders as root (`*.root.txt`). It only reads: it changes no setting on the phone.
+Questions shared by several scripts:
 
-```bash
-scripts/device_info.sh e113b3850013            # Redmi Note 12 Pro 4G -> devices/sweet2/
-scripts/device_info.sh SM02G4061988026         # Seeker               -> devices/seeker/
-```
+- **Celular:** the phones in `adb devices` (model and serial). After the choice the script prints the manufacturer, model, Android version, SoC and ABIs.
+- **Fontes / streams:** the `.y4m` files under `reference_videos/`, or the stream files under `streams/` that have a `.md5` next to them.
 
-| Argument  | Default   | Meaning                                                                             |
-| --------- | --------- | ----------------------------------------------------------------------------------- |
-| `serial`  |           | adb serial of the phone (`adb devices`)                                             |
-| `out_dir` | `devices` | Parent folder; the phone's folder is named after `ro.product.device` (its codename) |
+### `scripts/device_info.py`
 
-The raw outputs go to `devices/<codename>/raw/`. At the end the script runs `scripts/device_summary.py`, which writes `summary.md` and `summary.json` next to them. Run the script again to refresh a phone; it overwrites the folder's files.
+Records a phone's specifications over adb, in one pass, for the device table of the article and to choose the `bench.py` answers for that phone. It works without root. When `adb shell su -c id` returns root, it also reads cpufreq, thermal zones and the DSP folders as root (`*.root.txt`). It only reads: it changes no setting on the phone.
+
+It asks for the phone and the output folder (default `devices`). The phone's folder is named after `ro.product.device` (its codename), e.g. `devices/sweet2/` for the Redmi and `devices/seeker/` for the Seeker. The raw outputs go to `<folder>/<codename>/raw/`. At the end it runs `device_summary.py`, which writes `summary.md` and `summary.json` next to them. Run the script again to refresh a phone; it overwrites the folder's files.
 
 | File in `raw/`                            | Content                                                                                                                                                        |
 | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -142,9 +139,9 @@ The raw outputs go to `devices/<codename>/raw/`. At the end the script runs `scr
 | AV2 codecs           | Any codec of another `video/av0*` type                                                                                                                                                                                                                  |
 | GPU, DSP             | GLES renderer, Vulkan version (from `vkjson`, else from the `android.hardware.vulkan.version` feature), FastRPC nodes, `libcdsprpc`, and with root whether `fastrpc_shell_unsigned_3` exists                                                            |
 
-It ends with suggested `bench.py` options (`--cpus` per cluster, `--cooldown-c` or `--pause`, the root-only options, the `--cpumask` values) and the frequency steps of each policy for `--freq` and `freq_sweep.sh`. `summary.json` holds the same fields for the analysis scripts.
+It ends with suggested answers to the `bench.py` questions (cores per cluster, cool-down temperature or a fixed pause, the root-only choices, the `--cpumask` values) and the frequency steps of each policy. `summary.json` holds the same fields for the analysis scripts.
 
-`scripts/device_summary.py <device folder>` can be run on its own to rebuild the summary from the raw files, for example after a change to the parser.
+`scripts/device_summary.py` can be run on its own to rebuild a summary from the raw files, for example after a change to the parser. It lists the phone folders under `devices/` and `results/`.
 
 Notes:
 
@@ -152,9 +149,11 @@ Notes:
 - `current_now` is µA on most phones; the summary flags values that look like mA. The sign while charging is only known if the phone was charging (or discharging) while the script ran.
 - `devices/` is small text and meant to be tracked in git, so the specifications of each phone stay with the results. The summary contains the adb serial.
 
-### `scripts/install_phone.sh <serial> [dav2d|dav1d|all] [--arch arm64|armv7]`
+### `scripts/install_phone.py`
 
-Copies the decoders and their checkasm builds to `/data/local/tmp/av2` on the phone and records what is installed. Run it after every rebuild; `phone_smoke_test.sh` and `bench.py` use what it installs.
+Copies the decoders and their checkasm builds to `/data/local/tmp/av2` on the phone and records what is installed. Run it after every rebuild; `phone_smoke_test.py` and `bench.py` use what it installs.
+
+It asks for the phone, the architecture (default from the phone's `ro.product.cpu.abilist`: `arm64` if it lists `arm64-v8a`, else `armv7`), the decoders (each shows its source commit, or its build script if it is not built; blank = every built one) and whether to install checkasm.
 
 | Built on the PC                          | On the phone (`/data/local/tmp/av2/`) |
 | ---------------------------------------- | ------------------------------------- |
@@ -163,8 +162,7 @@ Copies the decoders and their checkasm builds to `/data/local/tmp/av2` on the ph
 | `build/dav1d-<arch>/tools/dav1d`         | `dav1d`                               |
 | `build/dav1d-<arch>-checkasm/tests/checkasm` | `checkasm-dav1d`                  |
 
-- `all` (the default) installs every decoder that is built and says which it skipped. Naming one decoder fails if it is not built, and names its build script (`scripts/build_dav2d.sh` or `scripts/build_dav1d.sh`). A missing checkasm build is reported but does not stop the install.
-- Without `--arch`, the phone's `ro.product.cpu.abilist` picks it: `arm64` if it lists `arm64-v8a`, else `armv7` (for 32-bit-only phones such as, possibly, the Galaxy A10s).
+- Each pushed file is made executable and its SHA-256 on the phone is compared with the local file. A missing checkasm build is reported but does not stop the install.
 - It ends by printing `--version` of each installed decoder, run on the phone, and the phone's `VERSIONS` file: one line per decoder with its source commit (from `src/<decoder>`, `-dirty` if the clone has local changes), arch and install date. Installing one decoder keeps the other's line.
 
 ```
@@ -172,66 +170,63 @@ dav1d 4e3ab21 arm64 2026-10-31T16:19:00-03:00
 dav2d 45609d9 arm64 2026-10-31T16:19:00-03:00
 ```
 
-### `scripts/phone_smoke_test.sh <serial> [dav2d|dav1d|all]`
+`Scripts-ViTech/Android/install_decoders.py` installs the same files in the same layout and also copies the test streams, `VERSIONS` and a report to the phone's Downloads folder.
 
-Checks that the decoders work on a phone. It runs `install_phone.sh` first, then tests each decoder listed in the phone's `VERSIONS` (`all`, the default, tests every one):
+### `scripts/phone_smoke_test.py`
 
-- **dav2d**: pushes the `dav2d-test-data` streams, decodes each one and compares it with its reference MD5 (`build/expected_md5.txt`, from the test-data meson file), then runs checkasm. Expected on the Redmi and the Seeker: 10 of 10 streams pass and `checkasm: all 1714 tests passed`.
-- **dav1d**: runs `checkasm-dav1d`, then decodes every `.ivf` in `streams/av1-test/` that has a `.md5` next to it with `--verify` (set `AV1_STREAMS` to use another folder). With no such streams, it says so and only runs checkasm.
+Checks that the decoders work on a phone. It asks the same questions as `install_phone.py` (phone, architecture, decoders) and, for dav1d, which folder of AV1 streams to check (folders under `streams/` with `.ivf` files that have a `.md5`). Then it installs the decoders and tests each one:
 
-Failed streams print `FAIL <name>`; the script still exits 0, as before, so read the `Streams:` lines.
+- **dav2d**: pushes the `dav2d-test-data` streams, decodes each one and compares it with its reference MD5 (from the test-data meson file), then runs checkasm. Expected on the Redmi and the Seeker: 10 of 10 streams pass and `checkasm: all 1714 tests passed`.
+- **dav1d**: runs `checkasm-dav1d` (2545 tests on the Redmi), then decodes the chosen folder's `.ivf` streams with `--verify`. With no AV1 streams it only runs checkasm.
+
+Failed streams print `FAIL <name>`; read the `Streams:` lines.
 
 ### `scripts/make_streams.py`
 
 Encodes AV2 test streams on the PC and writes each one's reference MD5.
 
-For each input, bit depth and QP it:
-
-1. converts the source to 8 bit with ffmpeg if `--bitdepth 8` is asked (once, kept in the output folder);
-2. encodes the first `--frames` frames with `avmenc`, using the random-access settings of `Scripts-ViTech/AVM/cfg/random_access.cfg`;
-3. decodes the stream with `avmdec --md5 --rawvideo` (the reference decoder) and saves the MD5 next to it.
-
-| Option       | Default   | Meaning                                                                                                                      |
+| Question     | Default   | Meaning                                                                                                                      |
 | ------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `inputs`     |           | One or more `.y4m` sources                                                                                                   |
-| `--qp`       | 160       | One or more QPs (AV2 range up to 255; higher = lower bitrate)                                                                |
-| `--frames`   | 33        | Frames to encode                                                                                                             |
-| `--bitdepth` | 10        | 10 and/or 8                                                                                                                  |
+| Fontes       |           | `.y4m` sources under `reference_videos/`; the smallest are encoded first                                                     |
+| Bit depth    | 10        | 10, 8 or both                                                                                                                |
+| QPs          | 160       | AVM qindex values, comma-separated (up to 255; higher = lower bitrate)                                                       |
+| Frames       | 33        | Frames to encode                                                                                                             |
 | `--cpu-used` | 0         | Encoder speed preset, 0–9. The CTC uses 0; 9 is the fastest but uses fewer coding tools, so streams may be lighter to decode |
-| `--threads`  | 8         | Encoder threads (only with `build/avm-x86`)                                                                                  |
-| `--out`      | `streams` | Output folder                                                                                                                |
+| Threads      | 8         | Encoder threads (only with `build/avm-x86`)                                                                                  |
+| Pasta        | `streams` | Output folder                                                                                                                |
+
+For each source, bit depth and QP it:
+
+1. converts the source to 8 bit with ffmpeg if 8 bit is asked (once, kept in the output folder);
+2. encodes the first frames with `avmenc`, using the random-access settings of `Scripts-ViTech/AVM/cfg/av2/random_access.cfg`;
+3. decodes the stream with `avmdec --md5 --rawvideo` (the reference decoder) and saves the MD5 next to it.
 
 Output names: `<video>_<height>p_<bits>bit_qp<QP>_f<frames>_s<preset>.obu`, plus `.md5` and `.enc.log`. The script uses `build/avm-x86` when it exists, else `build/avm`.
 
 ### `scripts/make_av1_streams.py`
 
-Encodes AV1 test streams on the PC, for the AV1 vs. AV2 comparison (RQ2), and writes each one's reference MD5. It is the AV1 counterpart of `make_streams.py` and uses the system ffmpeg's `libaom-av1` and `libsvtav1` encoders (`aomenc` and `SvtAv1EncApp` are not installed).
+Encodes AV1 test streams on the PC, for the AV1 vs. AV2 comparison (RQ2), and writes each one's reference MD5. It is the AV1 counterpart of `make_streams.py` and uses the system ffmpeg's `libaom-av1` and `libsvtav1` encoders. (For the CTC v9 AV1 encodes with `aomenc`, use `Scripts-ViTech/AVM/run_avm.py`.)
 
-For each input, bit depth and QP it:
+| Question | Default   | Meaning                                                                                            |
+| -------- | --------- | -------------------------------------------------------------------------------------------------- |
+| Fontes   |           | `.y4m` sources under `reference_videos/`; the smallest are encoded first                           |
+| Encoder  | SVT-AV1   | SVT-AV1 or libaom                                                                                  |
+| Bit depth| 10        | 10, 8 or both                                                                                      |
+| QPs      | 40        | AV1 QPs, 0–63, comma-separated (higher = lower bitrate)                                            |
+| Frames   | 33        | Frames to encode                                                                                   |
+| Preset   | 2 / 0     | Speed preset: SVT-AV1 preset 0–13 (default 2), libaom `cpu-used` 0–8 (default 0). Higher is faster |
+| Threads  | 8         | Encoder threads (libaom `-threads` with row multithreading; SVT-AV1 `lp`)                          |
+| PSNR     | no        | Append stream, encoder, QP, bit depth, frames, kbps, PSNR Y and PSNR YUV to `<out>/quality.csv`    |
+| Pasta    | `streams` | Output folder                                                                                      |
 
-1. converts the source to 8 bit with ffmpeg if `--bitdepth 8` is asked (once, kept in the output folder; the same file and conversion as `make_streams.py`, so AV1 and AV2 encode the same pixels when both use the same `--out`);
-2. encodes the first `--frames` frames at a fixed QP, with a GOP close to `Scripts-ViTech/AVM/cfg/random_access.cfg`: 16-frame mini-GOP, key frame every 65 frames, no TPL, no adaptive quantization;
+For each source, bit depth and QP it:
+
+1. converts the source to 8 bit with ffmpeg if 8 bit is asked (the same file and conversion as `make_streams.py`, so AV1 and AV2 encode the same pixels when both use the same output folder);
+2. encodes the first frames at a fixed QP, with a GOP close to `Scripts-ViTech/AVM/cfg/av2/random_access.cfg`: 16-frame mini-GOP, key frame every 65 frames, no TPL, no adaptive quantization;
 3. decodes the stream and saves the MD5 next to it, in the form `dav1d --verify` checks on the phone;
-4. with `--psnr`, measures the decoded stream against its source and appends a row to `<out>/quality.csv`.
+4. if asked, measures the decoded stream against its source and appends a row to `<out>/quality.csv`.
 
-| Option       | Default   | Meaning                                                                                            |
-| ------------ | --------- | -------------------------------------------------------------------------------------------------- |
-| `inputs`     |           | One or more `.y4m` sources                                                                         |
-| `--encoder`  | `svtav1`  | `libaom` or `svtav1`                                                                               |
-| `--qp`       | 40        | One or more QPs, 0–63 (higher = lower bitrate)                                                     |
-| `--frames`   | 33        | Frames to encode                                                                                   |
-| `--bitdepth` | 10        | 10 and/or 8                                                                                        |
-| `--preset`   | 0 / 2     | Speed preset: libaom `cpu-used` 0–8 (default 0), SVT-AV1 preset 0–13 (default 2). Higher is faster |
-| `--threads`  | 8         | Encoder threads (libaom `-threads` with row multithreading; SVT-AV1 `lp`)                          |
-| `--psnr`     | off       | Append stream, encoder, QP, bit depth, frames, kbps, PSNR Y and PSNR YUV to `<out>/quality.csv`    |
-| `--out`      | `streams` | Output folder                                                                                      |
-
-Output names: `<video>_<height>p_<bits>bit_<encoder>_q<QP>_f<frames>_p<preset>.ivf`, plus `.md5` and `.enc.log`. The log starts with the full ffmpeg command, followed by ffmpeg's banner and the encoder version. Each stream prints its size, bitrate (kbps, from the file size and the source frame rate) and, with `--psnr`, its PSNR.
-
-```bash
-.venv/bin/python scripts/make_av1_streams.py reference_videos/SparksElevator_480x270p_5994_10bit.y4m \
-    --encoder svtav1 --qp 30 40 50 --frames 17 --bitdepth 10 8 --preset 8 --out streams/poc_av1 --psnr
-```
+Output names: `<video>_<height>p_<bits>bit_<encoder>_q<QP>_f<frames>_p<preset>.ivf`, plus `.md5` and `.enc.log`. The log starts with the full ffmpeg command, followed by ffmpeg's banner and the encoder version. Each stream prints its size, bitrate (kbps, from the file size and the source frame rate) and, if asked, its PSNR.
 
 **Rate control.** The AVM config encodes with a fixed QP per frame (`--end-usage=q --use-fixed-qp-offsets=1`, no TPL, no delta-q). The closest match in each encoder:
 
@@ -244,26 +239,26 @@ AV1 QPs (0–63) and AVM QPs (0–255) are on different scales; compare operatin
 
 ### `scripts/bench.py`
 
-Benchmarks dav2d (or dav1d, with `--decoder`) on the phone. For each stream it copies the stream to the phone if needed, decodes it once with `--verify` to check the MD5, then makes `--runs` timed decodes for each thread count, one at a time. Before each timed run it waits until the CPU cools below `--cooldown-c` (or `--cooldown-timeout` passes).
+Benchmarks dav2d (or dav1d) on the phone. For each stream it copies the stream to the phone if needed, decodes it once with `--verify` to check the MD5, then makes the timed decodes for each thread count, one at a time. Before each timed run it waits until the CPU cools below the chosen temperature (at most 180 s).
 
 The timing runs in a single shell on the phone, so adb latency is not included. Each run decodes with the null muxer (no output written), records the decoder's per-frame times (`--frametimes`), and samples the battery current and voltage every 100 ms.
 
-| Option               | Default             | Meaning                                                                                                                                                         |
-| -------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--serial`           |                     | adb serial of the phone                                                                                                                                         |
-| `--streams`          |                     | `.obu` (AV2) or `.ivf` (AV1) files; each needs its `.md5`                                                                                                       |
-| `--decoder`          | `dav2d`             | Decoder on the phone: `dav2d` for AV2 `.obu` streams, `dav1d` for AV1 `.ivf` streams. It must be installed with `install_phone.sh`; the script stops before touching the phone's settings if it is not |
-| `--runs`             | 5                   | Timed runs per stream and thread count                                                                                                                          |
-| `--threads`          | 1                   | One or more decoder thread counts                                                                                                                               |
-| `--cpumask`          | all                 | Passed to the decoder: `0` = plain C only (measures the NEON gain), `neon`, `dotprod`, `i8mm`                                                                         |
-| `--lock-clocks`      | off                 | Sets the `performance` governor during the runs (root). The Redmi's ROM keeps the setting read-only, so the script unlocks it for the change and locks it again |
-| `--freq`             | off                 | Pins CPU policies at one frequency each, as `POLICY:KHZ` (e.g. `0:1017600`; root). It must be one of the policy's steps; other policies run at maximum. The original limits are restored at the end. Implies `--lock-clocks` |
-| `--cpus`             | all                 | Runs the decoder only on these cores (`taskset`), e.g. `0-5` (A55) or `6-7` (A76) on the Redmi |
-| `--battery-power`    | off                 | Pauses USB charging during the runs (root), so the power figures are real. adb stays connected                                                                  |
-| `--cooldown-c`       | 40                  | Target CPU temperature between runs. With locked clocks the Redmi idles at 50–55 °C: use about 58                                                               |
-| `--cooldown-timeout` | 180                 | Maximum wait per run, in seconds                                                                                                                                |
-| `--pause`            | 0                   | Fixed pause before each run, in seconds. For phones whose temperatures cannot be read without root (the Seeker), where the cool-down cannot work |
-| `--out`              | `results/bench.csv` | CSV file; new runs are appended                                                                                                                                 |
+| Question            | Default             | Meaning                                                                                                                                                         |
+| ------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Celular             |                     | The phone                                                                                                                                                       |
+| Decodificador       | dav2d               | `dav2d` for AV2 `.obu` streams, `dav1d` for AV1 `.ivf` streams. It must be installed with `install_phone.py`; the script stops if it is not                     |
+| Streams             |                     | Files under `streams/` of that type with a `.md5` next to them                                                                                                  |
+| Threads             | 1                   | One or more decoder thread counts, comma-separated                                                                                                              |
+| Execuções           | 5                   | Timed runs per stream and thread count                                                                                                                          |
+| Código              | all                 | `--cpumask`: every optimization, `0` = plain C only (measures the NEON gain), `neon`, `dotprod`, `i8mm`                                                         |
+| Núcleos             | all                 | Runs the decoder only on one cluster's cores (`taskset`), listed from the phone, e.g. 0-5 (A55) or 6-7 (A76) on the Redmi                                         |
+| Bateria             | yes (root)          | Pauses USB charging during the runs, so the power figures are real. adb stays connected                                                                         |
+| Frequência          | none (root)         | Pins one cluster at one of its frequency steps, chosen from the list the phone reports; other clusters run at maximum. The original limits are restored at the end. Implies the `performance` governor |
+| Governor            | no (root)           | Sets the `performance` governor during the runs. The Redmi's ROM keeps the setting read-only, so the script unlocks it for the change and locks it again       |
+| Temperatura         | 40 °C               | Target CPU temperature between runs. With locked clocks the Redmi idles at 50–55 °C: use about 58. On phones whose temperatures cannot be read (the Seeker without root) it asks for a fixed pause in seconds instead |
+| CSV                 | `results/bench.csv` | Output file; new runs are appended                                                                                                                              |
+
+Without root it skips the battery, frequency and governor questions and says so; power readings then include the charging current.
 
 Charging and the governor are restored at the end, also when the script fails or is stopped. If the PC loses the phone mid-run, restore them by hand:
 
@@ -278,7 +273,7 @@ CSV columns:
 | `date`, `device`                          | When the run finished; phone model                                                     |
 | `decoder`                                 | `dav2d` or `dav1d`                                                                     |
 | `stream`, `threads`, `cpumask`, `cpus`    | What was decoded and how (`all` = every optimization, every core)                      |
-| `clocks`, `power_source`                  | Governor during the run (`fixed` with `--freq`); `battery` or `usb`                    |
+| `clocks`, `power_source`                  | Governor during the run (`fixed` with a fixed frequency); `battery` or `usb`                    |
 | `freq_khz`                                | Frequency of each policy seen during the decode (`policy:kHz`; `low-high` if it moved) |
 | `run`                                     | Run number                                                                             |
 | `frames`, `wall_s`, `fps`                 | Frames decoded, wall time on the phone (s), frames per second                          |
@@ -287,31 +282,21 @@ CSV columns:
 | `power_mw`                                | Average battery power during the run; only meaningful when `power_source` is `battery` |
 | `md5_ok`                                  | Whether the verified decode of this stream matched the reference                       |
 
-Both decoders take the same command-line options that `bench.py` uses (`-q`, `--threads`, `--cpumask 0|neon|dotprod|i8mm`, `--muxer null`, `--frametimes`, `--verify`), so `--cpumask`, `--threads` and `--cpus` work the same way with either one. (Only `--inloopfilters` takes different values: dav1d has `nodeblock`, `nocdef`, `restoration`, `norestoration`; dav2d has `ccso`, `wiener`, `gdf` and `+`/`-` combinations.)
+Both decoders take the same command-line options that `bench.py` uses (`-q`, `--threads`, `--cpumask 0|neon|dotprod|i8mm`, `--muxer null`, `--frametimes`, `--verify`), so the code, threads and cores choices work the same way with either one. (Only `--inloopfilters` takes different values: dav1d has `nodeblock`, `nocdef`, `restoration`, `norestoration`; dav2d has `ccso`, `wiener`, `gdf` and `+`/`-` combinations.)
 
-```bash
-.venv/bin/python scripts/bench.py --serial e113b3850013 --decoder dav1d --streams streams/<av1 set>/*.ivf \
-    --runs 5 --threads 1 --lock-clocks --battery-power --cooldown-c 58 --out results/av1.csv
-```
+Older CSVs: a file written before this column existed (e.g. `results/poc_seeker.csv`) still takes new dav2d runs, in its own columns, since all its rows are dav2d; the script prints a note when it does this. dav1d runs into such a file are refused: choose another output CSV. `results/poc.csv` is older still (no `cpus`/`freq_khz`) and was already refused by the previous `bench.py`.
 
-Older CSVs: a file written before this column existed (e.g. `results/poc_seeker.csv`) still takes new dav2d runs, in its own columns, since all its rows are dav2d; the script prints a note when it does this. dav1d runs into such a file are refused: use a new `--out`. `results/poc.csv` is older still (no `cpus`/`freq_khz`) and was already refused by the previous `bench.py`.
+### `scripts/freq_sweep.py`
 
-### `scripts/freq_sweep.sh <serial> <policy> <cpus> <threads> <out.csv> <stream.obu>...`
+Runs `bench.py` once for every frequency step of one CPU cluster, with the decoder kept on that cluster's cores and the phone on battery. It shows how decoding speed and energy per frame scale with clock speed on one core type, which lets results from one phone predict others with the same cores at other clocks. It needs root.
 
-Runs `bench.py` once for every frequency step of one CPU cluster, with the decoder kept on that cluster's cores and the phone on battery. It shows how decoding speed and energy per frame scale with clock speed on one core type, which lets results from one phone predict others with the same cores at other clocks.
-
-```bash
-scripts/freq_sweep.sh e113b3850013 0 0-5 1 results/sweep_a55.csv streams/<set>/*.obu   # A55 cluster, 10 steps
-scripts/freq_sweep.sh e113b3850013 6 6-7 1 results/sweep_a76.csv streams/<set>/*.obu   # A76 cluster, 14 steps
-```
-
-Environment variables: `RUNS` (default 5), `COOLDOWN_C` (default 58), `FREQS` to sweep only some steps (e.g. `FREQS="576000 1804800"`), `DECODER` (default `dav2d`; `dav1d` with `.ivf` streams).
+It asks for the phone, the decoder and streams (as `bench.py`), the cluster (e.g. policy0 = A55 cores 0-5, 10 steps, and policy6 = A76 cores 6-7, 14 steps, on the Redmi), the frequencies (blank = all), the threads, the runs (default 5), the cool-down temperature (default 58 °C, at most 30 s per run) and the CSV (default `results/sweep_policy<N>.csv`).
 
 On the Redmi, the ROM's power service (`libperfmgr`) briefly raises minimum frequencies on some events, and `thermal-engine` can lower the maximum when the phone is hot. `bench.py` records the frequencies during every decode (`freq_khz`) and warns when a fixed frequency moved; discard or repeat those runs.
 
-### `scripts/summarize.py <csv>`
+### `scripts/summarize.py`
 
-Prints median, minimum and maximum fps and median power for each decoder, stream, thread count and code path in a bench CSV. Rows of older CSVs without a `decoder` column count as dav2d.
+Lists the CSVs under `results/` (most recent first) and prints median, minimum and maximum fps and median power for each decoder, stream, thread count and code path of the chosen one. Rows of older CSVs without a `decoder` column count as dav2d.
 
 ### `tools_html2docx.py <html> <docx>`
 
@@ -321,14 +306,11 @@ Converts `proposal.html` into the `.docx` sent to the supervisor (headings, para
 
 ```bash
 scripts/bootstrap.sh
-.venv/bin/python scripts/make_streams.py reference_videos/SparksElevator_480x270p_5994_10bit.y4m \
-    --qp 210 --frames 17 --bitdepth 10 8 --cpu-used 9 --out streams/poc
-scripts/phone_smoke_test.sh e113b3850013
-.venv/bin/python scripts/bench.py --serial e113b3850013 --streams streams/poc/*.obu --runs 5 --threads 1 8 \
-    --lock-clocks --battery-power --cooldown-c 58 --cooldown-timeout 30 --out results/poc.csv
-.venv/bin/python scripts/bench.py --serial e113b3850013 --streams streams/poc/*.obu --runs 5 --threads 1 \
-    --cpumask 0 --lock-clocks --battery-power --cooldown-c 58 --cooldown-timeout 30 --out results/poc.csv
-.venv/bin/python scripts/summarize.py results/poc.csv
+.venv/bin/python scripts/make_streams.py        # SparksElevator; 10 and 8 bit; QP 210; 17 frames; cpu-used 9; streams/poc
+.venv/bin/python scripts/phone_smoke_test.py
+.venv/bin/python scripts/bench.py               # streams/poc; threads 1,8; 5 runs; battery; governor performance; 58 °C
+.venv/bin/python scripts/bench.py               # the same with code "C puro (--cpumask 0)" and 1 thread
+.venv/bin/python scripts/summarize.py
 ```
 
 These streams are tiny (about 0.1 s of decoding), so they only show that the pipeline works. Real measurements need at least 1–2 s of decoding per run. The `results/poc.csv` in the folder was written by an older `bench.py` with fewer columns; to reproduce, write to a new file.

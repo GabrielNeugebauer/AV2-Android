@@ -1,18 +1,20 @@
 """Summarizes a bench.py CSV: median, min and max fps and median power per decoder, stream, threads and code path.
 
-Usage (from the AV2-Android folder):
-    python scripts/summarize.py results/poc.csv
+Interactive: python3 scripts/summarize.py   (picks a CSV from results/)
 
-CSVs from before bench.py had --decoder have no decoder column; their rows are dav2d.
+CSVs from before bench.py had the decoder column have no decoder column; their rows are dav2d.
 """
 
 import csv
 import statistics
 import sys
 
+from interativo import ROOT, menu
 
-def main(path):
-    rows = list(csv.DictReader(open(path)))
+
+def summarize(path):
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
     groups = {}
     for r in rows:
         key = (r.get("decoder", "dav2d"), r["stream"], int(r["threads"]),
@@ -28,5 +30,18 @@ def main(path):
     print(f"\n{len(rows)} runs, all MD5 correct: {all(r['md5_ok'] == 'True' for r in rows)}")
 
 
+def main():
+    csvs = sorted((ROOT / "results").rglob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not csvs:
+        sys.exit("Nenhum CSV em results/.")
+    path = csvs[menu("RESULTADOS (mais recentes primeiro)", [str(p.relative_to(ROOT)) for p in csvs],
+                     "Selecione o CSV (em branco = 1): ", default=0)]
+    print()
+    summarize(path)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")

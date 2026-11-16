@@ -1,21 +1,24 @@
 """Encodes AV2 test streams with AVM and writes the reference MD5 of each one.
 
 For every input .y4m and QP: optionally converts it to 8 bit with ffmpeg, encodes the first N frames with avmenc
-using the random-access settings of Scripts-ViTech (AVM/cfg/random_access.cfg), then decodes the stream with
+using the random-access settings of Scripts-ViTech (AVM/cfg/av2/random_access.cfg), then decodes the stream with
 avmdec (the reference decoder) to write <stream>.md5, which bench.py uses to check every decode on the phone.
 With the optimized build, --threads sets the encoder threads; the generic build only runs single-threaded.
 
-Usage (from the AV2-Android folder):
-    python scripts/make_streams.py reference_videos/SparksElevator_480x270p_5994_10bit.y4m \
-        --qp 210 --frames 17 --bitdepth 10 8 --cpu-used 9 --out streams/poc
+Interactive: python3 scripts/make_streams.py
+It asks for the sources (.y4m under reference_videos/), the bit depths, the QPs, the number of frames, the speed
+preset, the encoder threads and the output folder. The smallest sources are encoded first.
 
 Stream names follow <video>_<height>p_<bits>bit_qp<QP>_f<frames>_s<preset>.obu; the encoder log is kept as .enc.log.
 """
 
-import argparse
+import os
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+from interativo import ask_number, ask_numbers, ask_text, confirm_or_exit, menu, pick_files, title
 
 HERE = Path(__file__).resolve().parent.parent
 # build/avm-x86: optimized (AVM_TARGET_CPU=x86_64) and multithreaded. build/avm: generic C, single-threaded;
@@ -23,7 +26,7 @@ HERE = Path(__file__).resolve().parent.parent
 AVM_DIR = next(d for d in (HERE / "build/avm-x86", HERE / "build/avm") if (d / "avmenc").exists())
 AVMENC = AVM_DIR / "avmenc"
 AVMDEC = AVM_DIR / "avmdec"
-RA_CFG = HERE.parent / "Scripts-ViTech/AVM/cfg/random_access.cfg"
+RA_CFG = HERE.parent / "Scripts-ViTech/AVM/cfg/av2/random_access.cfg"
 
 
 def y4m_height(path):
@@ -42,39 +45,47 @@ def to_8bit(src, dst):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inputs", nargs="+", type=Path, help=".y4m sources")
-    ap.add_argument("--qp", type=int, nargs="+", default=[160])
-    ap.add_argument("--frames", type=int, default=33)
-    ap.add_argument("--bitdepth", type=int, nargs="+", default=[10], choices=[8, 10])
-    ap.add_argument("--cpu-used", type=int, default=0,
-                    help="AVM speed preset; the CTC uses 0, higher is faster but uses fewer tools")
-    ap.add_argument("--threads", type=int, default=8, help="encoder threads (optimized build only)")
-    ap.add_argument("--out", type=Path, default=Path("streams"))
-    opts = ap.parse_args()
+    os.chdir(HERE)
+    if not RA_CFG.exists():
+        sys.exit(f"{RA_CFG} não existe (vem do repositório Scripts-ViTech, ao lado do AV2-Android).")
+    inputs = sorted(pick_files("FONTES (.y4m)", HERE / "reference_videos", {".y4m"}), key=lambda p: p.stat().st_size)
+    depths = [[10], [8], [10, 8]][menu("BIT DEPTH", ["10 bits", "8 bits (converte a fonte com ffmpeg)", "10 e 8 bits"],
+                                       "Selecione (em branco = 1): ", default=0)]
+    title("CODIFICAÇÃO")
+    qps = ask_numbers("QPs (qindex do AVM)", [160])
+    frames = ask_number("Frames", 33, minimum=1)
+    cpu_used = ask_number("--cpu-used (0 = o da CTC, mais lento; maior = mais rápido)", 0, minimum=0)
+    threads = ask_number("Threads do encoder", 8, minimum=1) if AVM_DIR.name == "avm-x86" else 1
+    out = Path(ask_text("Pasta de saída", "streams"))
+    print(f"\n{len(inputs) * len(depths) * len(qps)} stream(s) com {AVMENC}")
+    confirm_or_exit()
 
-    opts.out.mkdir(parents=True, exist_ok=True)
-    ra_args = [a for a in RA_CFG.read_text().split() if not a.startswith("--cpu-used")]
+    out.mkdir(parents=True, exist_ok=True)
+    ra_args = [a for line in RA_CFG.read_text().splitlines() for a in line.split("#", 1)[0].split()
+               if not a.startswith("--cpu-used")]
 
-    for src in opts.inputs:
-        for depth in opts.bitdepth:
-            source = src if depth == 10 else to_8bit(src, opts.out / f"{src.stem}_8bit.y4m")
-            for qp in opts.qp:
-                name = f"{src.stem.split('_')[0]}_{y4m_height(src)}p_{depth}bit_qp{qp}_f{opts.frames}_s{opts.cpu_used}"
-                obu = opts.out / f"{name}.obu"
-                cmd = [str(AVMENC), *ra_args, f"--cpu-used={opts.cpu_used}", f"--bit-depth={depth}",
-                       *([f"--threads={opts.threads}"] if AVM_DIR.name == "avm-x86" else []),
-                       f"--input-bit-depth={depth}", f"--qp={qp}", f"--limit={opts.frames}",
+    for src in inputs:
+        for depth in depths:
+            source = src if depth == 10 else to_8bit(src, out / f"{src.stem}_8bit.y4m")
+            for qp in qps:
+                name = f"{src.stem.split('_')[0]}_{y4m_height(src)}p_{depth}bit_qp{qp}_f{frames}_s{cpu_used}"
+                obu = out / f"{name}.obu"
+                cmd = [str(AVMENC), *ra_args, f"--cpu-used={cpu_used}", f"--bit-depth={depth}",
+                       *([f"--threads={threads}"] if AVM_DIR.name == "avm-x86" else []),
+                       f"--input-bit-depth={depth}", f"--qp={qp}", f"--limit={frames}",
                        "-o", str(obu), str(source)]
                 t0 = time.time()
-                log = opts.out / f"{name}.enc.log"
+                log = out / f"{name}.enc.log"
                 with open(log, "w") as f:
                     subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=True)
                 md5 = subprocess.run([str(AVMDEC), "--md5", "--rawvideo", str(obu)],
                                      capture_output=True, text=True, check=True).stdout.split()[0]
-                (opts.out / f"{name}.md5").write_text(md5 + "\n")
+                (out / f"{name}.md5").write_text(md5 + "\n")
                 print(f"{obu.name}: {obu.stat().st_size / 1024:.0f} KiB, encoded in {time.time() - t0:.0f} s, md5 {md5}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")
