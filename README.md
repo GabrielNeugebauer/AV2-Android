@@ -52,8 +52,9 @@ On a new PC, `scripts/bootstrap.sh` runs every step below in order. Each step sk
 | Step | Script | What it does |
 | ---- | ------ | ------------ |
 | 1 | `scripts/setup_host.sh` | Checks git, cmake, make, ninja, ffmpeg, adb, python3, nasm (optional) and the NDK, printing `OK` or `MISSING` with the install command. Creates `.venv` with meson 1.12.1. Installs nothing system-wide; exits 1 if a required tool is missing |
-| 2 | `scripts/fetch_sources.sh [name...]` | Clones `dav2d`, `dav2d-test-data`, `dav1d` and `avm` (branch `av2-normative`) into `src/` and checks out the pinned commits. Clones that are already at their pin are left alone; one at another commit is moved to the pin only if it has no local changes |
+| 2 | `scripts/fetch_sources.sh [name...]` | Clones `dav2d`, `dav2d-test-data`, `dav1d`, `avm` (branch `av2-normative`) and `libaom` (`v3.15.3`) into `src/` and checks out the pinned commits. Clones that are already at their pin are left alone; one at another commit is moved to the pin only if it has no local changes |
 | 3 | `scripts/build_avm.sh` | AVM encoder and reference decoder for the PC (`build/avm-x86/avmenc`, `avmdec`), optimized and multithreaded |
+| 3b | `scripts/build_libaom.sh` | libaom AV1 encoder and decoder for the PC (`build/libaom-x86/aomenc`, `aomdec`), used by `Scripts-ViTech/AVM/run_avm.py` for the CTC v9 AV1 encodes |
 | 4 | `scripts/build_dav2d.sh [arm64\|armv7]` | dav2d for the phone: the release decoder and the checkasm build |
 | 5 | `scripts/build_dav1d.sh [arm64\|armv7\|host]` | dav1d (AV1, for the comparison) for the phone in the same layout, or `host` for the PC, to compute the reference MD5 of AV1 streams |
 

@@ -10,7 +10,8 @@ SRC_DIR=${SRC_DIR:-src}
 PINS="dav2d             https://code.videolan.org/videolan/dav2d.git           45609d9  main
       dav2d-test-data   https://code.videolan.org/videolan/dav2d-test-data.git ec53c12  main
       dav1d             https://code.videolan.org/videolan/dav1d.git           4e3ab21  master
-      avm               https://github.com/AOMediaCodec/avm                    14f43e4  av2-normative"
+      avm               https://github.com/AOMediaCodec/avm                    14f43e4  av2-normative
+      libaom            https://aomedia.googlesource.com/aom                   b141d9c  v3.15.3"
 
 mkdir -p "$SRC_DIR"
 while read -r name url commit branch; do

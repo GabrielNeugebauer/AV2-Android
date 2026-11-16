@@ -6,6 +6,7 @@
 | dav2d-test-data | `ec53c12` | AVM v15.0.0 conformance streams |
 | dav1d | `4e3ab21` (2026-10-28) | for the AV1 comparison |
 | AVM (encoder) | `14f43e4 (2026-10-08)`, branch `av2-normative` | the branch dav2d's CI decodes against; built in `build/avm-x86` |
+| libaom (aomenc/aomdec) | `v3.15.3` (`b141d9c`) | standard AV1 encoder for the CTC v9 encodes (`Scripts-ViTech/AVM/run_avm.py`); built in `build/libaom-x86` |
 | Android NDK | 28.2.13676358 | target API 29 (Android 10), arm64-v8a |
 | meson | 1.12.1 | in `.venv/` (`scripts/setup_host.sh`) |
 | ffmpeg | 6.1.1-3ubuntu5 (system) | runs the AV1 encoders in `make_av1_streams.py` |
